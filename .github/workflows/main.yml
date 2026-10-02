@@ -1,45 +1,39 @@
 
-name: Debian RDP
+name: Linux Full Desktop RDP
 
 on:
   workflow_dispatch:
 
 jobs:
-  secure-rdp:
+  linux-desktop:
     runs-on: ubuntu-latest
     timeout-minutes: 330
 
     steps:
 
-      # ==========================================
-      # 1. Update System and Install Dependencies
-      # ==========================================
-      - name: Install XFCE and XRDP
+      # 1. Install Desktop Environment
+      - name: Install LXQt and XRDP
         run: |
           set -e
 
           sudo apt-get update
 
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            xfce4 \
-            xfce4-goodies \
-            xfce4-session \
-            xfce4-panel \
-            xfdesktop4 \
-            xfwm4 \
+            lxqt \
+            lxqt-core \
+            lxqt-session \
+            openbox \
             xrdp \
             xorgxrdp \
             dbus-x11 \
-            dbus-daemon \
             dbus-user-session \
+            x11-xserver-utils \
             curl \
             netcat-openbsd
 
-          echo "Desktop packages installed successfully."
+          echo "LXQt installation completed."
 
-      # ==========================================
       # 2. Create RDP User
-      # ==========================================
       - name: Create RDP User
         env:
           RDP_USERNAME: ${{ secrets.RDP_USERNAME }}
@@ -48,7 +42,7 @@ jobs:
           set -e
 
           if [ -z "$RDP_USERNAME" ] || [ -z "$RDP_PASSWORD" ]; then
-            echo "ERROR: RDP credentials are missing."
+            echo "Missing RDP credentials."
             exit 1
           fi
 
@@ -67,107 +61,62 @@ jobs:
 
           echo "RDP_USERNAME=$RDP_USERNAME" >> "$GITHUB_ENV"
 
-          echo "RDP user created successfully."
-
-      # ==========================================
-      # 3. Configure XFCE Session
-      # ==========================================
-      - name: Configure XFCE Desktop
+      # 3. Configure LXQt Session
+      - name: Configure LXQt
         env:
           RDP_USERNAME: ${{ secrets.RDP_USERNAME }}
         run: |
           set -e
 
-          # Configure user session
           sudo tee "/home/$RDP_USERNAME/.xsession" > /dev/null <<'EOF'
           #!/bin/sh
+
           unset SESSION_MANAGER
           unset DBUS_SESSION_BUS_ADDRESS
+
           export XDG_SESSION_TYPE=x11
-          exec dbus-run-session -- startxfce4
+          export XDG_CONFIG_DIRS=/etc/xdg
+
+          exec dbus-launch --exit-with-session startlxqt
           EOF
 
-          sudo chmod +x "/home/$RDP_USERNAME/.xsession"
+          sudo chmod 755 "/home/$RDP_USERNAME/.xsession"
 
           sudo chown "$RDP_USERNAME:$RDP_USERNAME" \
             "/home/$RDP_USERNAME/.xsession"
 
-          # Clear stale XFCE session cache
           sudo rm -rf "/home/$RDP_USERNAME/.cache/sessions"
 
-          # Set correct home permissions
           sudo chown -R "$RDP_USERNAME:$RDP_USERNAME" \
             "/home/$RDP_USERNAME"
 
-          echo "XFCE session configured."
+          echo "LXQt session configured."
 
-      # ==========================================
-      # 4. Configure XRDP Startup
-      # ==========================================
-      - name: Configure XRDP Startup
-        run: |
-          set -e
-
-          # Keep a backup of the original startup script
-          sudo cp /etc/xrdp/startwm.sh \
-            /etc/xrdp/startwm.sh.backup
-
-          # Start XFCE directly with a fresh D-Bus session
-          sudo tee /etc/xrdp/startwm.sh > /dev/null <<'EOF'
-          #!/bin/sh
-
-          if [ -r /etc/profile ]; then
-              . /etc/profile
-          fi
-
-          unset SESSION_MANAGER
-          unset DBUS_SESSION_BUS_ADDRESS
-
-          export XDG_SESSION_TYPE=x11
-
-          exec dbus-run-session -- startxfce4
-          EOF
-
-          sudo chmod 755 /etc/xrdp/startwm.sh
-
-          echo "XRDP startup script configured."
-
-      # ==========================================
-      # 5. Start XRDP Service
-      # ==========================================
-      - name: Start XRDP
+      # 4. Configure XRDP
+      - name: Configure XRDP
         run: |
           set -e
 
           sudo adduser xrdp ssl-cert || true
 
           sudo systemctl enable xrdp
+
           sudo systemctl restart xrdp
 
           sleep 5
 
-          if ! sudo systemctl is-active --quiet xrdp; then
-            echo "ERROR: XRDP failed to start."
-            sudo journalctl -u xrdp -n 50 --no-pager
-            exit 1
-          fi
+          sudo systemctl status xrdp --no-pager
 
-          echo "XRDP service is running."
-
-      # ==========================================
-      # 6. Install Tailscale
-      # ==========================================
+      # 5. Install Tailscale
       - name: Install Tailscale
         run: |
           set -e
 
           curl -fsSL https://tailscale.com/install.sh | sh
 
-          echo "Tailscale installed successfully."
+          echo "Tailscale installed."
 
-      # ==========================================
-      # 7. Connect Tailscale
-      # ==========================================
+      # 6. Connect Tailscale
       - name: Connect Tailscale
         env:
           TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
@@ -175,130 +124,99 @@ jobs:
           set -e
 
           if [ -z "$TAILSCALE_AUTH_KEY" ]; then
-            echo "ERROR: Tailscale auth key is missing."
+            echo "Missing Tailscale authentication key."
             exit 1
           fi
 
           sudo tailscale up \
             --authkey="$TAILSCALE_AUTH_KEY" \
-            --hostname=github-debian-rdp
+            --hostname=github-linux-desktop
 
           sleep 10
 
           IP=$(tailscale ip -4)
 
           if [ -z "$IP" ]; then
-            echo "ERROR: Tailscale IP not found."
+            echo "Tailscale IP not found."
             exit 1
           fi
 
           echo "TAILSCALE_IP=$IP" >> "$GITHUB_ENV"
 
-          echo "Tailscale connected successfully."
+          echo "Tailscale connected."
 
-      # ==========================================
-      # 8. Test RDP
-      # ==========================================
-      - name: Test RDP Connection
+      # 7. Verify Desktop and RDP
+      - name: Verify Desktop
         run: |
           set -e
 
-          echo "Checking XRDP port..."
+          echo "Checking LXQt..."
+
+          command -v startlxqt
+
+          echo "Checking XRDP..."
+
+          if ! sudo systemctl is-active --quiet xrdp; then
+            sudo journalctl -u xrdp -n 50 --no-pager
+            exit 1
+          fi
+
+          echo "Checking port 3389..."
 
           if ! sudo ss -tlnp | grep -q ':3389'; then
-            echo "ERROR: XRDP is not listening on port 3389."
+            echo "XRDP port is not listening."
             exit 1
           fi
 
-          echo "Checking local connection..."
+          echo "Desktop and RDP services are ready."
 
-          if ! nc -z 127.0.0.1 3389; then
-            echo "ERROR: Local RDP connection failed."
-            exit 1
-          fi
-
-          echo "Checking Tailscale..."
-
-          tailscale status
-
-          echo "RDP service is ready."
-
-      # ==========================================
-      # 9. Diagnostics
-      # ==========================================
-      - name: XRDP Diagnostics
+      # 8. Diagnostics
+      - name: Desktop Diagnostics
         if: always()
         run: |
-          echo "================================"
-          echo "        XRDP STATUS"
-          echo "================================"
+          echo "===== XRDP STATUS ====="
 
           sudo systemctl status xrdp --no-pager || true
 
-          echo ""
-          echo "================================"
-          echo "        XRDP LOGS"
-          echo "================================"
+          echo "===== XRDP LOGS ====="
 
           sudo journalctl -u xrdp -n 60 --no-pager || true
 
-          echo ""
-          echo "================================"
-          echo "        SESSION CONFIG"
-          echo "================================"
+          echo "===== XRDP SESSION LOG ====="
 
-          if [ -f "/home/$RDP_USERNAME/.xsession" ]; then
-            cat "/home/$RDP_USERNAME/.xsession"
-          fi
+          sudo tail -n 60 /var/log/xrdp-sesman.log || true
 
-          echo ""
-          echo "================================"
-          echo "        XFCE PACKAGES"
-          echo "================================"
+          echo "===== LXQT SESSION ====="
 
-          dpkg -l | grep -E 'xfce4-session|xrdp|dbus' || true
+          cat "/home/$RDP_USERNAME/.xsession" || true
 
-          echo ""
-          echo "================================"
-          echo "        SESSION ERRORS"
-          echo "================================"
+          echo "===== SESSION ERRORS ====="
 
           sudo cat "/home/$RDP_USERNAME/.xsession-errors" \
             2>/dev/null || true
 
-          echo ""
-          echo "================================"
-          echo "        XRDP SESMAN LOG"
-          echo "================================"
-
-          sudo tail -n 60 /var/log/xrdp-sesman.log \
-            2>/dev/null || true
-
-      # ==========================================
-      # 10. Keep Runner Alive
-      # ==========================================
+      # 9. Keep Runner Alive
       - name: Maintain Connection
         run: |
           echo ""
           echo "================================"
-          echo "        DEBIAN RDP READY"
+          echo "      LINUX DESKTOP READY"
           echo "================================"
           echo "Address : $TAILSCALE_IP"
           echo "Port    : 3389"
           echo "Username: $RDP_USERNAME"
           echo "Password: Your GitHub Secret"
-          echo "Desktop : XFCE"
+          echo "Desktop : LXQt"
           echo "================================"
-          echo ""
 
           while true; do
 
-            echo "[$(date)] RDP Running"
+            echo "[$(date)] Linux Desktop Running"
 
             tailscale status
 
             if ! sudo systemctl is-active --quiet xrdp; then
-              echo "XRDP stopped. Restarting..."
+              echo "Restarting XRDP..."
               sudo systemctl restart xrdp
             fi
 
