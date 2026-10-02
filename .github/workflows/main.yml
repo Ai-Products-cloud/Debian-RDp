@@ -1,30 +1,5 @@
 
-name: Debian RDP
-
-on:
-  workflow_dispatch:
-
-jobs:
-  secure-rdp:
-    runs-on: ubuntu-latest
-    timeout-minutes: 330
-
-    steps:
-      # Update system and install desktop environment
-      - name: Install XFCE and XRDP
-        run: |
-          sudo apt-get update
-
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            xfce4 \
-            xfce4-goodies \
-            xrdp \
-            dbus-x11 \
-            xorgxrdp \
-            curl \
-            openssl
-
-      # Create RDP user
+      # Create RDP User and Configure XFCE
       - name: Create RDP User
         env:
           RDP_USERNAME: ${{ secrets.RDP_USERNAME }}
@@ -45,95 +20,25 @@ jobs:
 
           sudo usermod -aG sudo,ssl-cert "$RDP_USERNAME"
 
-          echo "RDP_USERNAME=$RDP_USERNAME" >> "$GITHUB_ENV"
-
           # Configure XFCE session
-          echo "startxfce4" | sudo tee "/home/$RDP_USERNAME/.xsession"
+          sudo tee "/home/$RDP_USERNAME/.xsession" > /dev/null <<'EOF'
+          #!/bin/sh
+          unset DBUS_SESSION_BUS_ADDRESS
+          unset XDG_RUNTIME_DIR
+          export XDG_CONFIG_DIRS=/etc/xdg
+          exec dbus-launch --exit-with-session startxfce4
+          EOF
+
+          sudo chmod +x "/home/$RDP_USERNAME/.xsession"
 
           sudo chown "$RDP_USERNAME:$RDP_USERNAME" "/home/$RDP_USERNAME/.xsession"
 
-      # Configure XRDP
-      - name: Configure XRDP
-        run: |
-          sudo adduser xrdp ssl-cert
+          # Ensure XFCE and D-Bus components are installed
+          sudo apt-get install -y \
+            xfce4-session \
+            xfce4-panel \
+            xfdesktop4 \
+            dbus-x11 \
+            xorgxrdp
 
-          sudo systemctl enable xrdp
-          sudo systemctl restart xrdp
-
-          sleep 5
-
-          sudo systemctl status xrdp --no-pager
-
-      # Install Tailscale
-      - name: Install Tailscale
-        run: |
-          curl -fsSL https://tailscale.com/install.sh | sh
-
-      # Connect Tailscale
-      - name: Connect Tailscale
-        env:
-          TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
-        run: |
-          set -e
-
-          sudo tailscale up \
-            --authkey="$TAILSCALE_AUTH_KEY" \
-            --hostname=github-debian-rdp
-
-          sleep 10
-
-          IP=$(tailscale ip -4)
-
-          if [ -z "$IP" ]; then
-            echo "Tailscale IP not found"
-            exit 1
-          fi
-
-          echo "TAILSCALE_IP=$IP" >> "$GITHUB_ENV"
-
-      # Test RDP
-      - name: Test RDP Connection
-        run: |
-          echo "Testing XRDP..."
-
-          if ! sudo ss -tlnp | grep -q ':3389'; then
-            echo "XRDP port 3389 is not listening"
-            sudo systemctl status xrdp --no-pager
-            exit 1
-          fi
-
-          echo "XRDP port is active"
-
-          echo "Testing Tailscale connectivity..."
-
-          tailscale status
-
-          echo "RDP service is ready"
-
-      # Keep Runner Alive
-      - name: Maintain Connection
-        run: |
-          echo ""
-          echo "================================"
-          echo "        DEBIAN RDP READY"
-          echo "================================"
-          echo "Address : $TAILSCALE_IP"
-          echo "Port    : 3389"
-          echo "Username: $RDP_USERNAME"
-          echo "Password: Your GitHub Secret"
-          echo "Desktop : XFCE"
-          echo "================================"
-          echo ""
-
-          while true; do
-            echo "[$(date)] RDP Running"
-
-            tailscale status
-
-            sudo systemctl is-active --quiet xrdp || {
-              echo "XRDP service stopped"
-              sudo systemctl restart xrdp
-            }
-
-            sleep 60
-          done
+          echo "RDP_USERNAME=$RDP_USERNAME" >> "$GITHUB_ENV"
